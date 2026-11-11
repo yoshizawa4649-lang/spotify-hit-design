@@ -1,0 +1,306 @@
+---
+title: "Can a Hit Be Designed? Audio Features and Spotify Popularity Beyond Genre"
+subtitle: "Short-video platforms reward 'viral' songs, but how much of a track's popularity does its sound actually explain?"
+author: "Towa Yoshizawa"
+date: last-modified
+description: "A regression case study of 28,356 Spotify tracks asking how much audio features add to genre in explaining popularity."
+execute:
+  warning: false
+  message: false
+---
+
+**Narrative word count:** Replace with a number from 750 to 1,000.
+
+::: {.callout-tip}
+This template suggests one way to tell the story. You may rename, combine, or reorder headings and add, remove, or move code chunks. Use plots, tables, selected model output, and prose in whatever combination best communicates your evidence. Keep every required part easy to find, use no more than four primary figures or tables, and delete this note and all bold prompts before submitting.
+:::
+
+## The question
+
+These days, many songs seem to be made to go viral on TikTok and other short-video apps. Some people even say you can design a hit by choosing the right length, energy, or beat. I wanted to test this idea with data. My question is: **after accounting for genre, how much are a song's audio features related to its Spotify popularity, and how much do they add beyond genre?** This matters for independent artists and small labels, who have limited time and money and must decide whether to focus on the sound or on promotion.
+
+I used the [Spotify Songs dataset from TidyTuesday](https://github.com/rfordatascience/tidytuesday/tree/main/data/2020/2020-01-21) (January 2020). Some songs appeared in more than one playlist, so I kept one row per song, which left 28,356 songs. The response is Spotify's popularity score (0 to 100). The predictors are playlist genre (six genres) and ten audio features, such as track length, energy, loudness, and danceability. One limitation is that popularity is Spotify's own score, and about 9% of songs score exactly 0. Some of these may be duplicate versions, not songs that nobody listens to.
+
+## What the baseline shows
+
+```{r}
+#| label: load-data
+library(tidyverse)
+library(splines)   # for natural splines, ns()
+
+
+spotify_raw <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2020/2020-01-21/spotify_songs.csv")
+
+# Some tracks appear on several playlists, so keep one row per track
+songs <- spotify_raw |>
+  distinct(track_id, .keep_all = TRUE) |>
+  mutate(duration_min = duration_ms / 60000)   # milliseconds -> minutes
+
+genre_only <- lm(track_popularity ~ playlist_genre, data = songs)
+
+baseline <- lm(track_popularity ~ playlist_genre + danceability + energy +
+                 loudness + speechiness + acousticness + instrumentalness +
+                 liveness + valence + tempo + duration_min,
+               data = songs)
+
+# R-squared: genre only vs. genre + audio features
+summary(genre_only)$r.squared
+summary(baseline)$r.squared
+
+anova(genre_only, baseline)                 # partial F-test
+coef(baseline)["duration_min"]              # change per extra minute
+confint(baseline)["duration_min", ]         # 95% CI
+sigma(baseline)                             # typical prediction error
+```
+
+```{r}
+#| label: fig-first-look
+#| fig-width: 8
+#| fig-height: 6
+#| fig-cap: "Each gray dot is one track; the blue line is the average trend (with a 95% band). About 1% of tracks with extreme loudness or length are left out of the plot only."
+songs |>
+  # Drop about 1% of tracks with extreme values so the plot is readable
+  filter(loudness > -20, duration_min > 1.5, duration_min < 7.5) |>
+  select(track_popularity,
+         "Track length (minutes)" = duration_min,
+         "Energy (0 to 1)"        = energy,
+         "Loudness (dB)"          = loudness,
+         "Danceability (0 to 1)"  = danceability) |>
+  pivot_longer(-track_popularity, names_to = "feature", values_to = "value") |>
+  ggplot(aes(x = value, y = track_popularity)) +
+  geom_point(alpha = 0.03, colour = "grey40") +
+  geom_smooth(colour = "#2a78d6", linewidth = 1) +
+  facet_wrap(~ feature, scales = "free_x") +
+  labs(title = "Popularity changes only a little with each audio feature",
+       x = "Audio feature value",
+       y = "Spotify popularity (0 to 100)") +
+  theme_minimal()
+```
+
+As a starting point, I fit a multiple linear regression with genre and all ten audio features. It is simple and matches my question: because genre is in the model, each feature is compared among songs in the same genre.
+
+The audio features help, but only a little. R-squared rose from 0.043 (genre only) to 0.089, and the partial F-test was significant (F = 141.9, p < 0.001). Track length had the clearest result. Holding genre and the other features constant, each extra minute was linked to a popularity score 2.4 points lower (95% CI: 2.1 to 2.7 points lower). So a 5-minute song is expected to score about 5 points lower than a similar 3-minute song, which is small next to the typical prediction error of about 23 points.
+
+The baseline has two limits. It uses straight lines, but @fig-first-look shows curves; for example, popularity rises with loudness only until about −5 dB. It also assumes that the length pattern is the same in every genre.
+
+## Going beyond the baseline
+
+**Use two STAT 330 method families. Give each part a descriptive heading that states the question or finding, not an assignment label. Explain why you chose each method, how you checked it, and what it adds to the answer.**
+
+### Shorter songs score higher in most genres, but not in rock
+
+```{r}
+#| label: splines
+spline_model <- lm(track_popularity ~ playlist_genre + ns(danceability, 3) +
+                     ns(energy, 3) + ns(loudness, 3) + speechiness + acousticness +
+                     instrumentalness + liveness + valence + tempo + ns(duration_min, 3),
+                   data = songs)
+
+# Let the track-length curve be different in each genre
+interaction_model <- lm(track_popularity ~ playlist_genre * ns(duration_min, 3) +
+                          ns(danceability, 3) + ns(energy, 3) + ns(loudness, 3) +
+                          speechiness + acousticness + instrumentalness + liveness +
+                          valence + tempo,
+                        data = songs)
+
+anova(baseline, spline_model)            # do curves help?
+anova(spline_model, interaction_model)   # does the length curve differ by genre?
+```
+
+
+```{r}
+#| label: fig-length-by-genre
+#| fig-width: 8
+#| fig-height: 5
+#| fig-cap: "Predicted popularity by track length in each genre, for a song with all other features at their median. Bands are 95% confidence intervals."
+# A "typical" song: every other audio feature at its median
+typical <- songs |>
+  summarise(across(c(danceability, energy, loudness, speechiness, acousticness,
+                     instrumentalness, liveness, valence, tempo), median))
+
+new_songs <- expand_grid(playlist_genre = sort(unique(songs$playlist_genre)),
+                         duration_min = seq(2, 6, by = 0.1),
+                         typical)
+
+pred <- predict(interaction_model, newdata = new_songs, interval = "confidence")
+new_songs <- bind_cols(new_songs, as_tibble(pred))
+
+ggplot(new_songs, aes(x = duration_min, y = fit)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), fill = "#2a78d6", alpha = 0.2) +
+  geom_line(colour = "#2a78d6", linewidth = 1) +
+  facet_wrap(~ playlist_genre) +
+  labs(title = "Longer songs score lower in most genres, but not in rock",
+       x = "Track length (minutes)",
+       y = "Predicted popularity (0 to 100)") +
+  theme_minimal()
+```
+
+```{r}
+#| label: change-3-to-5
+# Expected change from a 3-minute to a 5-minute song in each genre, with a 95% CI
+change_3_to_5 <- function(genre) {
+  two_songs <- expand_grid(playlist_genre = genre, duration_min = c(3, 5), typical)
+  X <- model.matrix(delete.response(terms(interaction_model)), two_songs,
+                    xlev = interaction_model$xlevels)
+  d <- X[2, ] - X[1, ]                                   # 5 minutes minus 3 minutes
+  est <- sum(d * coef(interaction_model))
+  se  <- sqrt(drop(t(d) %*% vcov(interaction_model) %*% d))
+  tibble(genre, change = est, lower = est - 1.96 * se, upper = est + 1.96 * se)
+}
+
+map(sort(unique(songs$playlist_genre)), change_3_to_5) |>
+  list_rbind() |>
+  mutate(across(where(is.numeric), ~ round(.x, 1)))
+```
+
+To fix the straight-line problem, I replaced the lines for length, energy, loudness, and danceability with natural splines (3 degrees of freedom each). I also let the length curve change by genre with an interaction. Both steps improved the fit (partial F = 20.8 for the splines and 8.8 for the interaction, both p < 0.001).
+
+@fig-length-by-genre shows that the length pattern depends on genre. In EDM, a 5-minute song is expected to score about 11 points lower than a 3-minute song (95% CI: 9.4 to 13.0). Pop, rap, and R&B drop about 8 points (7.6 to 8.9), and Latin about 5. In rock, there is almost no difference (+0.3 points; 95% CI: −1.6 to 2.1). So "shorter is better" is not a general rule.
+
+### Sound adds only a little when predicting new songs
+
+```{r}
+#| label: cross-validation
+models <- list(
+  "Genre only"               = track_popularity ~ playlist_genre,
+  "Baseline"                 = formula(baseline),
+  "Splines"                  = formula(spline_model),
+  "Splines + genre x length" = formula(interaction_model)
+)
+
+set.seed(330)
+cv_results <- tibble()
+for (r in 1:5) {                                          # repeat 5 times
+  fold <- sample(rep(1:10, length.out = nrow(songs)))     # random 10 folds
+  for (k in 1:10) {
+    train <- songs[fold != k, ]
+    test  <- songs[fold == k, ]
+    for (name in names(models)) {
+      fit  <- lm(models[[name]], data = train)
+      pred <- predict(fit, newdata = test)
+      rmse <- sqrt(mean((test$track_popularity - pred)^2))
+      cv_results <- bind_rows(cv_results,
+                              tibble(model = name, repeat_id = r, fold = k, rmse = rmse))
+    }
+  }
+}
+
+# Average prediction error for each model
+cv_results |>
+  group_by(model) |>
+  summarise(mean_rmse = mean(rmse),
+            sd_rmse   = sd(rmse),
+            cv_r2     = 1 - mean(rmse^2) / var(songs$track_popularity)) |>
+  arrange(desc(mean_rmse))
+
+# In how many of the 50 folds did the baseline beat genre only?
+cv_results |>
+  pivot_wider(names_from = model, values_from = rmse) |>
+  summarise(baseline_better = sum(Baseline < `Genre only`))
+```
+
+A better fit on the same data does not always mean better prediction, so I used 10-fold cross-validation repeated 5 times. Each model was fit on 90% of the songs and tested on the other 10%.
+
+Adding the audio features lowered the prediction error (RMSE) from 23.2 to 22.6 points, and this happened in all 50 folds. The splines and the genre interaction lowered it only a little more, to 22.5. The best model explains about 10% of the variation in new songs (cross-validated R-squared = 0.096), while genre alone explains about 4%. The flexible model did not overfit, but the gain was small.
+
+## A new direction with AI
+
+```{r}
+#| label: random-forest-cv
+library(ranger)   # random forest (not covered in STAT 330)
+
+# 4 songs have no artist name, so use the track id for them
+songs <- songs |> mutate(artist = coalesce(track_artist, track_id))
+
+# Artist-grouped folds: all songs by one artist stay in the same fold
+set.seed(330)
+artists <- unique(songs$artist)
+artist_folds <- tibble(artist = artists,
+                       fold = sample(rep(1:10, length.out = length(artists))))
+fold <- left_join(songs, artist_folds, by = "artist")$fold
+
+rf_formula <- formula(baseline)   # same genre + 10 audio features as the baseline
+rmse <- function(actual, predicted) sqrt(mean((actual - predicted)^2))
+
+ext_results <- tibble()
+for (k in 1:10) {
+  train <- songs[fold != k, ]
+  test  <- songs[fold == k, ]
+  # Regression models from the previous section
+  for (name in names(models)) {
+    fit <- lm(models[[name]], data = train)
+    ext_results <- bind_rows(ext_results,
+      tibble(model = name, fold = k, rmse = rmse(test$track_popularity, predict(fit, test))))
+  }
+  # Random forest
+  forest <- ranger(rf_formula, data = train, num.trees = 300,
+                   mtry = 3, min.node.size = 200, seed = 330)
+  ext_results <- bind_rows(ext_results,
+    tibble(model = "Random forest", fold = k,
+           rmse = rmse(test$track_popularity, predict(forest, test)$predictions)))
+}
+
+ext_results |>
+  group_by(model) |>
+  summarise(mean_rmse = mean(rmse),
+            cv_r2     = 1 - mean(rmse^2) / var(songs$track_popularity)) |>
+  arrange(desc(mean_rmse))
+```
+
+```{r}
+#| label: fig-importance
+#| fig-width: 7
+#| fig-height: 4.5
+#| fig-cap: "Permutation importance from a random forest fit to all songs: how much the prediction error (MSE) grows when one feature is randomly shuffled."
+forest_all <- ranger(rf_formula, data = songs, num.trees = 300, mtry = 3,
+                     min.node.size = 200, importance = "permutation", seed = 330)
+
+tibble(feature = names(forest_all$variable.importance),
+       importance = forest_all$variable.importance) |>
+  ggplot(aes(x = importance, y = reorder(feature, importance))) +
+  geom_col(fill = "#2a78d6") +
+  labs(title = "The forest relies most on genre, then loudness, energy, and length",
+       x = "Increase in prediction error (MSE) when the feature is shuffled",
+       y = NULL) +
+  theme_minimal()
+```
+
+```{r}
+#| label: random-forest-checks
+# Check 1: the forest's built-in out-of-bag error should match the CV error
+sqrt(forest_all$prediction.error)
+
+# Check 2: shuffle the audio features within each genre;
+# the forest should then do no better than genre alone
+set.seed(331)
+shuffled <- songs |>
+  group_by(playlist_genre) |>
+  mutate(across(c(danceability, energy, loudness, speechiness, acousticness,
+                  instrumentalness, liveness, valence, tempo, duration_min), sample)) |>
+  ungroup()
+
+forest_null <- ranger(rf_formula, data = shuffled, num.trees = 300, mtry = 3,
+                      min.node.size = 200, seed = 330)
+sqrt(forest_null$prediction.error)   # forest with shuffled sound
+sigma(genre_only)                    # genre-only regression, for comparison
+```
+
+My regression models showed that sound adds only a little. But maybe they were just too simple to find the real pattern. To test this, I used AI help to fit a random forest, a tree-based model not covered in STAT 330 that can find complex curves and interactions on its own. I gave it the same genre and ten audio features and compared it with my regression models using 10-fold cross-validation. This time I grouped the folds by artist, so songs by the same artist were never in both the training and test sets.
+
+The random forest predicted best, but only slightly. Its RMSE was 22.3 points, compared with 22.6 for my spline and interaction model and 23.2 for genre alone, and it explained only about 11% of the variation in new songs. @fig-importance shows that it relied most on genre, then loudness, energy, and track length. I checked the result in two ways. The forest's built-in out-of-bag error (22.3) matched my cross-validation, and when I shuffled the audio features within each genre, the forest did no better than genre alone (23.3 vs. 23.2). So even a flexible model finds little "hit formula" in these features.
+
+
+Details are in the [AI-use record](ai-use.qmd).
+
+## What this means
+
+My answer is that sound is related to Spotify popularity, but it explains only a small part of it. The statistical evidence is strong: the audio features improved prediction in every fold, and even a flexible random forest explained only about 11% of the variation. In practice, however, they lowered the prediction error by less than one point on a 100-point scale. Track length was the most useful feature, and its pattern depended on genre: shorter songs scored higher in EDM and pop, but not in rock.
+
+So a hit probably cannot be designed through sound alone. These results are associations, not causes, and Spotify popularity is not the same as going viral on TikTok. The data also come from playlists in early 2020. A useful next step would be to add information about promotion or the artist's existing fan base, which may explain much more of the variation.
+
+## Data and code
+
+- **Data:** [TidyTuesday Spotify Songs (2020-01-21)](https://github.com/rfordatascience/tidytuesday/tree/main/data/2020/2020-01-21). The code reads the CSV directly from this URL, so no data file is stored in the repository.
+- **Repository:** Replace with your repository URL.
+- [AI-use record](ai-use.qmd)
+- **Other sources:** Spotify for Developers, [Web API reference: Get Track](https://developer.spotify.com/documentation/web-api/reference/get-track) (definition of popularity); R packages `tidyverse`, `splines`, and `ranger` ([Wright & Ziegler, 2017](https://doi.org/10.18637/jss.v077.i01)).

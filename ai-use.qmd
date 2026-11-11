@@ -1,0 +1,49 @@
+---
+title: "AI Use and Verification"
+description: "A concise record of AI-supported work on this project."
+author: "Towa Yoshizawa"
+---
+
+This page is a work log, not a second report. Short bullets are welcome. It is separate from the final case study and does not count toward the 750 to 1,000 word range.
+
+## Starting point
+
+**AI system and date:** Claude (Anthropic), Claude Opus 5.5 in the Claude app; November 5, 6, and 10, 2026.
+
+- **Question:** After controlling for genre, how strongly are a track's audio features associated with its Spotify popularity score, and how much additional explanatory power do they provide beyond genre? (Motivation: can a hit be designed through sound?)
+- **Course-based core model:** additive multiple linear regression of `track_popularity` (0 to 100) on playlist genre (6 levels) plus ten audio features, fit to 28,356 unique tracks from the TidyTuesday Spotify Songs data (January 2020).
+- **Baseline result:** the audio features improve on a genre-only model (partial F = 141.9 on 10 and 28,340 df, p < 0.001), but R² rises only from 0.043 to 0.089 and the residual SD is 22.6 points. Each additional minute of track length is associated with a 2.4-point lower popularity score (95% CI: 2.1 to 2.7 points lower), holding genre and the other features fixed.
+- **Limitation or opportunity:** straight-line terms miss curved patterns (popularity rises with loudness only up to about −5 dB, and danceability matters mainly above about 0.75), and in-sample R² cannot show how much sound truly adds beyond genre. A remaining question was whether the regression models were simply too rigid to find a stronger "hit formula" in the audio features.
+
+## Substantive prompts
+
+I'm reading the TidyTuesday Spotify Songs data (2020-01-21) in R with readr::read_csv() from the raw GitHub URL. The file has 32,833 rows, but track_id is not unique because the same track appears on several playlists. I want one row per track, so I'm using distinct(track_id, .keep_all = TRUE). Is this a reasonable approach when the observational unit is a track? What are the risks of keeping only the first playlist row (for example, tracks listed under more than one genre), and how can I check how many tracks are affected?
+
+I'm making an exploratory figure in ggplot2. For each of four audio features (duration_min, energy, loudness, danceability), I split tracks into deciles with ntile(), then compute the mean of (popularity minus the track's genre average) in each decile with a 95% CI. I also want a shaded band showing the middle 50% of tracks in each decile. I want facets with free x-axes and a short direct label for the band and the line in the first panel only. Here is my code: [paste code]. Here is the problem I'm getting: [describe problem or paste error]. How can I fix it?
+
+
+I am creating a regression case study in R and Quarto. My question is: after controlling for genre, how strongly are a track's audio features associated with its Spotify popularity score, and how much additional explanatory power do they provide beyond genre? The broader motivation is whether a hit song can be designed through its sound. The response is track_popularity, Spotify's 0 to 100 popularity score, treated as continuous. The main predictors are playlist genre (EDM, Latin, pop, R&B, rap, rock) and ten Spotify audio features: danceability, energy, loudness (dB), speechiness, acousticness, instrumentalness, liveness, valence, tempo (BPM), and track length (minutes). The data are 28,356 unique tracks from the TidyTuesday Spotify Songs dataset (January 2020). My course-based core model is an additive multiple linear regression of popularity on genre plus the ten audio features. For my two required course elements, I plan to use (1) natural splines and genre-by-feature interactions and (2) repeated 10-fold cross-validation comparing genre-only, linear, and spline/interaction models by RMSE. My main result so far is that the audio features improve on genre alone (partial F = 141.9 on 10 and 28,340 df, p < 0.001), but R-squared rises only from 0.043 to 0.089 and the residual SD is 22.6 points; for example, each additional minute of track length is associated with a 2.4-point lower popularity score (95% CI: 2.1 to 2.7). I found this limitation or opportunity: the linear terms miss curved patterns (loudness levels off above about -5 dB; danceability matters mainly above about 0.75), in-sample R-squared cannot show how much sound truly adds beyond genre, and 9.2% of tracks have a popularity score of exactly 0, which may reflect duplicate releases rather than true unpopularity. Suggest three feasible extensions that keep the core analysis connected to regression methods taught in my class. One option may be a model not taught in class used as a comparator. For each, explain how it strengthens the same research question, how its result would enter the final case study, the implementation steps, and two ways I could verify it. Do not choose for me.
+
+## My decisions
+
+- **Selected extension:** a random forest (`ranger`), a tree-based model not covered in STAT 330, used as a comparator to my course-based regression models. It uses the same genre and ten audio features, and every model is compared with the same artist-grouped 10-fold cross-validation and RMSE. I chose it because it directly tests whether a more flexible model can find a "hit formula" in sound that my regression missed.
+- **Accepted:** using the same predictors, folds, and metric for every model; grouping the folds by artist (the grouped cross-validation idea from Unit 5), so the forest cannot learn an artist's sound in training and reuse it in testing; and adding permutation importance to see which features the forest relies on.
+- **Changed:** the forest's default settings overfit (out-of-bag RMSE 22.8), so I tuned two settings with the out-of-bag error (mtry = 3, minimum node size = 200; out-of-bag RMSE 22.3). I used one round of 10-fold cross-validation for this comparison instead of five repeats to keep rendering time reasonable.
+- **Rejected or corrected:** I did not choose the other two suggested options, a mixed-effects model with artist random intercepts and quantile regression for the top 10% of songs, because they would shift the focus away from comparing prediction with and without sound. I also kept the tracks with popularity 0, because dropping them changed the track-length coefficient by about a third without a clear reason to treat them all as errors.
+
+**Connection to the final case study:** the method and result appear in the "A new direction with AI" section: a cross-validation comparison of the random forest with the regression models and a permutation-importance figure. The result supports the main answer in "What this means": even a flexible model explains only about 11% of the variation in new songs, so the small R² of my regression is not just because the model is too simple.
+
+## Independent verification
+
+1. **Out-of-bag error vs. cross-validation (official documentation):** the `ranger` documentation states that `prediction.error` is the out-of-bag mean squared error for regression ([ranger on CRAN](https://cran.r-project.org/package=ranger); [Wright & Ziegler, 2017](https://doi.org/10.18637/jss.v077.i01)). The forest's out-of-bag RMSE (22.31) matched my artist-grouped cross-validation RMSE (22.34) and a random-fold cross-validation RMSE (22.30). This shows that my cross-validation loop computes the error correctly and that songs by the same artist do not inflate the forest's performance much.
+2. **Negative control (shuffled features):** I shuffled the ten audio features within each genre, which breaks any real link between sound and popularity. The forest's out-of-bag RMSE rose to 23.26, about the same as the genre-only regression (23.18). This shows that the forest's small gain comes from real information in the audio features, not from a coding error or data leakage.
+
+## Remaining limitation
+
+Spotify's ten audio features are only a rough summary of sound. They do not capture lyrics, melody, hooks, or production quality, and the data are playlist songs from early 2020. So the forest's ceiling of about 11% only shows how much these particular features can predict, not that sound in general cannot matter. Also, the forest's settings were chosen with out-of-bag error on all songs, which may make its cross-validation error slightly optimistic.
+
+## Other AI use, if any
+
+Translate my research question from Japanese into natural academic English for a STAT 330 regression proposal. Keep my meaning, but flag any wording that makes a causal claim my observational data cannot support, and any claim that doesn't match my data (tracks on Spotify genre playlists from January 2020, not music charts).
+
+Claude drafted the "Starting point" summary and the extension-selection prompt, and provided an example draft of the case-study page, including R code for splines, interactions, and cross-validation. I reviewed it and rewrote the narrative in my own words.
